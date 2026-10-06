@@ -1,0 +1,17 @@
+{
+  "name": "inclinometer-monitor",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @incli/shared",
+    "build:web": "npm run build -w @incli/web",
+    "build:server": "npm run build -w @incli/server",
+    "build": "npm run build:shared && npm run build:web && npm run build:server",
+    "test": "npm run test -w @incli/server",
+    "dev:server": "npm run dev -w @incli/server",
+    "dev:web": "npm run dev -w @incli/web"
+  }
+}

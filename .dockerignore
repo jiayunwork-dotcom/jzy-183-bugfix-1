@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+*.log
+packages/web/node_modules
+packages/server/node_modules
+packages/shared/node_modules

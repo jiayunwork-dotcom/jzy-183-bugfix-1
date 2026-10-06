@@ -1,0 +1,20 @@
+{
+  "name": "@incli/web",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@incli/shared": "1.0.0",
+    "echarts": "^5.5.1",
+    "vue": "^3.4.31",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.5",
+    "vite": "^5.3.3"
+  }
+}

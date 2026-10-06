@@ -1,0 +1,27 @@
+{
+  "name": "@incli/server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('src/storage/schema.sql','dist/storage/schema.sql')\"",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "@incli/shared": "1.0.0",
+    "fastify": "^4.28.1",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
