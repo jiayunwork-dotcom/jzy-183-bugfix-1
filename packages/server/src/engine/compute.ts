@@ -6,7 +6,7 @@ import type {
   IncrementalResult,
   PreparedMeasurement,
 } from './types.js';
-import { LEVEL_RANK, classifyRate, median, thresholdsAtDepth } from './geometry.js';
+import { LEVEL_RANK, classifyRate, thresholdsAtDepth } from './geometry.js';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -52,7 +52,10 @@ interface BuildContext {
   groups: GroupInfo[];
   groupByIndex: GroupInfo[];
   relatives: RelEntry[]; // per prepared index
-  anchors: number[]; // per group
+  /** 每段相对第 0 段的逐深度拼接偏移，anchors[k][d]，段 0 为全 0。 */
+  anchors: number[][];
+  /** 每个新基准复测相对上一段末测被吸收掉的逐深度原始差异（诊断用）。 */
+  rawOffsets: number[][];
   connected: number[][];
 }
 
@@ -70,21 +73,36 @@ function buildRelatives(ctx: BuildContext): void {
 }
 
 /**
- * 基准拼接（决策，详见 docs/datum.md）：
- * anchor[0] = 0；新段 k 的基准是该段第一次测量（修复/换探头当天复测），
- * 认为它与上一段最后一次测量之间没有真实位移，逐深度差异全部为系统偏移，
- * 取所有深度差异的中位数（L1 最优的标量偏移）作为拼接量：
- *   anchor[k] = anchor[k-1] + median_d(relative(prev_last, d))
- * connected(m, d) = anchor[group(m)] + relative(m, d)
+ * 基准拼接（决策，详见 README“基准（datum）”与 docs/datum.md）：
+ *
+ * anchor[0][d] = 0。新段 k 的基准是该段第一次测量 reset_k（修复/换探头当天复测），
+ * 它的段内相对剖面处处为 0。认为 reset_k 与上一段最后一次测量 last_{k−1} 之间
+ * 没有真实位移，两次测量在每个深度的差异全部来自系统差（换探头零漂/管型改变），
+ * 因此逐深度对齐，而不是取单一标量：
+ *
+ *   anchor[k][d]    = anchor[k-1][d] + R_d(last_{k-1})
+ *                   = connected(last_{k-1}, d)
+ *   rawOffset[k][d] = C_d(reset_k) - C_d(last_{k-1})   （被吸收的逐深度原始差异）
+ *   connected(m, d) = anchor[group(m)][d] + R_d(m)
+ *
+ * 于是 reset_k 当天的连续剖面与上一测逐深度重合（孔底固定点仍为 0），
+ * 跨基准速率为 0、不产生误警；常数零漂在累计剖面上呈逐段累积的线性形状，
+ * 只有逐深度向量才能整体抵消。
  */
 function buildAnchors(ctx: BuildContext): void {
-  const { groups, relatives } = ctx;
-  ctx.anchors[0] = 0;
+  const { prepared, groups, relatives } = ctx;
+  const width = prepared[0]!.points.length;
+  ctx.anchors[0] = new Array(width).fill(0);
+  ctx.rawOffsets[0] = new Array(width).fill(0);
   for (let k = 1; k < groups.length; k++) {
     const prevLast = groups[k]!.start - 1;
+    const prevAnchor = ctx.anchors[k - 1]!;
     const prevRel = relatives[prevLast]!.rel;
-    const offset = median([...prevRel].sort((a, b) => a - b));
-    ctx.anchors[k] = ctx.anchors[k - 1]! + offset;
+    ctx.anchors[k] = prevAnchor.map((a, d) => a + prevRel[d]!);
+
+    const resetPm = prepared[groups[k]!.base]!;
+    const prevPm = prepared[prevLast]!;
+    ctx.rawOffsets[k] = resetPm.points.map((pt, d) => pt.cumulativeRaw - prevPm.points[d]!.cumulativeRaw);
   }
 }
 
@@ -92,7 +110,7 @@ function buildConnected(ctx: BuildContext): void {
   const { groupByIndex, anchors, relatives, connected } = ctx;
   relatives.forEach((entry, i) => {
     const anchor = anchors[groupByIndex[i]!.datumIndex]!;
-    connected[i] = entry.rel.map((v) => v + anchor);
+    connected[i] = entry.rel.map((v, d) => v + anchor[d]!);
   });
 }
 
@@ -115,6 +133,7 @@ export function computeBoreholeFull(
     groupByIndex: prepared.map((_, i) => groupOf(groups, i)),
     relatives: [],
     anchors: [],
+    rawOffsets: [],
     connected: [],
   };
   buildRelatives(ctx);
@@ -131,6 +150,7 @@ export function computeBoreholeFull(
         datumIndex: g.datumIndex,
         reason: pm.measurement.datumReason,
         anchor: ctx.anchors[g.datumIndex]!,
+        rawOffset: ctx.rawOffsets[g.datumIndex]!,
       };
     });
   return { results, boundaries };
@@ -242,7 +262,7 @@ function sameResult(a: ComputedResult, b: ComputedResult): boolean {
     a.datumIndex === b.datumIndex &&
     a.ordinalInDatum === b.ordinalInDatum &&
     a.relativeBaseMeasurementId === b.relativeBaseMeasurementId &&
-    a.datumAnchor === b.datumAnchor &&
+    arraysEqual(a.datumAnchor, b.datumAnchor) &&
     a.maxAbsRate === b.maxAbsRate &&
     a.level === b.level &&
     arraysEqual(a.relativeDisplacements, b.relativeDisplacements) &&

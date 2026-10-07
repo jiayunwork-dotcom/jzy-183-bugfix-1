@@ -110,8 +110,11 @@ export interface MeasurementResult {
   maxAbsRate: number | null;
   level: AlarmLevel;
   relativeBaseMeasurementId: string | null;
-  /** 与上一段拼接使用的标量偏移（mm），段内基准以外为 0。 */
-  datumAnchor: number;
+  /**
+   * 本基准段相对第 0 段的逐深度拼接偏移（mm，与 points 同序）。
+   * 第 0 段为全 0；新基准段在段内基准处与上一段末测逐深度对齐（见 README“基准”）。
+   */
+  datumAnchor: number[];
   crossDatumRate: boolean;
   points: ProfilePoint[];
 }
@@ -121,7 +124,10 @@ export interface DatumBoundary {
   measuredAt: string;
   datumIndex: number;
   reason: DatumReason;
-  anchor: number;
+  /** 逐深度拼接偏移（mm，与各点深度同序）。 */
+  anchor: number[];
+  /** 对齐前新基准复测与上一段末测的逐深度原始差异（被吸收的零漂/管型差，mm）。 */
+  rawOffset: number[];
 }
 
 export interface ComputeBoreholeResult {

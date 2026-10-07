@@ -117,3 +117,89 @@ describe('物理对称性', () => {
     expect(preparedDirty[0]!.points).toHaveLength(3);
   });
 });
+
+/**
+ * 换探头（新基准）拼接：新探头的常数零漂逐段累加后在累计剖面上呈线性形状，
+ * 标量偏移无法抵消，必须逐深度对齐。孔深 2 m、间距 0.5 m、四个测点，
+ * 孔底（2.0 m）为固定点。
+ */
+const bh4: EngineBorehole = {
+  id: 'bh4',
+  code: 'BH-4',
+  depth: 2.0,
+  spacing: 0.5,
+  checksumTolerance: 0.01,
+  thresholds: [{ depth: 0.5, blue: 1, yellow: 2, red: 4 }],
+};
+
+function measurement4(tiltsAsc: number[], id: string, t: number, reset = false): EngineMeasurement {
+  const depths = [0.5, 1.0, 1.5, 2.0];
+  return {
+    id,
+    measuredAtMs: t * MS_DAY,
+    probeCode: 'P1',
+    datumReset: reset,
+    datumReason: reset ? 'probe_change' : 'initial',
+    inputToken: id,
+    rows: depths.map((depth, i) => {
+      const diff = tiltsAsc[i]!;
+      return { depth, forward: 0.5 + diff / 2, reverse: 0.5 - diff / 2, probeCodeForward: 'P1', probeCodeReverse: 'P1' };
+    }),
+  };
+}
+
+const MS_DAY = 86_400_000;
+
+describe('换探头新基准：逐深度对齐', () => {
+  it('当天连续剖面与旧探头末测重合、孔底为零、速率为零；其后速率只反映真实增量', () => {
+    const ms = [
+      measurement4([0, 0, 0, 0], 'm0', 0),
+      measurement4([0.004, 0.004, 0, 0], 'm2', 2),
+      measurement4([0.006, 0.006, 0.002, 0.002], 'm4', 4, true),
+      measurement4([0.008, 0.008, 0.002, 0.002], 'm6', 6),
+    ];
+    const prepared = prepareMeasurements(bh4, probes(), ms);
+    const { results, boundaries } = computeBoreholeFull(bh4, prepared, () => 1);
+
+    const r4 = results[2]!;
+    expect(r4.relativeDisplacements.every((v) => Math.abs(v) < 1e-9)).toBe(true);
+    expect(r4.connectedDisplacements.map((v) => Number(v.toFixed(6)))).toEqual([4, 2, 0, 0]);
+    expect(r4.cumulativeRaw.map((v) => Number(v.toFixed(6)))).toEqual([8, 5, 2, 1]);
+    expect(r4.rates.map((v) => Number(v!.toFixed(6)))).toEqual([0, 0, 0, 0]);
+    expect(r4.level).toBe('none');
+    expect(r4.datumAnchor.map((v) => Number(v.toFixed(6)))).toEqual([4, 2, 0, 0]);
+    expect(r4.crossDatum.every(Boolean)).toBe(true);
+
+    const r6 = results[3]!;
+    expect(r6.relativeDisplacements.map((v) => Number(v.toFixed(6)))).toEqual([2, 1, 0, 0]);
+    expect(r6.connectedDisplacements.map((v) => Number(v.toFixed(6)))).toEqual([6, 3, 0, 0]);
+    expect(r6.rates.map((v) => Number(v!.toFixed(6)))).toEqual([1, 0.5, 0, 0]);
+    // 1 mm/d 带 ~1e-15 正浮点残差，严格 > 蓝阈值 → 蓝
+    expect(r6.level).toBe('blue');
+    expect(r6.crossDatum.every((f) => !f)).toBe(true);
+
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0]!.anchor.map((v) => Number(v.toFixed(6)))).toEqual([4, 2, 0, 0]);
+    expect(boundaries[0]!.rawOffset.map((v) => Number(v.toFixed(6)))).toEqual([4, 3, 2, 1]);
+  });
+
+  it('连续两次换探头（含只有一次测量的段）：第二边界对齐到紧邻的一测', () => {
+    const ms = [
+      measurement4([0, 0, 0, 0], 'm0', 0),
+      measurement4([0.004, 0, 0, 0], 'm2', 2), // 累计 [2,0,0,0]
+      measurement4([0.006, 0.002, 0.002, 0.002], 'm4', 4, true), // 原始 [6,3,2,1]
+      measurement4([0.009, 0.005, 0.005, 0.005], 'm6', 6, true), // 原始 [12,7.5,5,2.5]
+    ];
+    const prepared = prepareMeasurements(bh4, probes(), ms);
+    const { results, boundaries } = computeBoreholeFull(bh4, prepared, () => 1);
+
+    // m4 对齐 m2 → [2,0,0,0]
+    expect(results[2]!.connectedDisplacements.map((v) => Number(v.toFixed(6)))).toEqual([2, 0, 0, 0]);
+    expect(results[2]!.rates.map((v) => Number(v!.toFixed(6)))).toEqual([0, 0, 0, 0]);
+    // 段 1 只有一次测量；m6 对齐 m4 的连续剖面，仍是 [2,0,0,0]
+    expect(results[3]!.connectedDisplacements.map((v) => Number(v.toFixed(6)))).toEqual([2, 0, 0, 0]);
+    expect(results[3]!.rates.map((v) => Number(v!.toFixed(6)))).toEqual([0, 0, 0, 0]);
+    expect(boundaries.map((b) => b.datumIndex)).toEqual([1, 2]);
+    expect(boundaries[1]!.anchor.map((v) => Number(v.toFixed(6)))).toEqual([2, 0, 0, 0]);
+  });
+});

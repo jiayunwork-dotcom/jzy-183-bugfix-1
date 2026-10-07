@@ -92,14 +92,25 @@ export class QueryService {
         crossDatum: m.result!.points.map((p) => p.crossDatum),
       }));
     const boundaries = detail.measurements
-      .filter((m) => m.datumReset && m.result && m.result.datumIndex > 0)
-      .map((m) => ({
-        measurementId: m.id,
-        measuredAt: m.measuredAt,
-        datumIndex: m.result!.datumIndex,
-        anchor: m.result!.datumAnchor,
-        reason: m.datumReason,
-      }));
+      .map((m, i) => ({ m, i }))
+      .filter(({ m }) => m.datumReset && m.result && m.result.datumIndex > 0)
+      .map(({ m, i }) => {
+        // 被吸收的逐深度原始差异 = 新基准复测原始累计 − 上一段末测原始累计（见 docs/datum.md）。
+        const prevResult = i > 0 ? detail.measurements[i - 1]!.result : null;
+        const rawOffset =
+          prevResult && prevResult.points.length === m.result!.points.length
+            ? m.result!.points.map((p, d) => p.cumulativeRaw - prevResult.points[d]!.cumulativeRaw)
+            : m.result!.points.map(() => 0);
+        return {
+          measurementId: m.id,
+          measuredAt: m.measuredAt,
+          datumIndex: m.result!.datumIndex,
+          anchor: m.result!.datumAnchor,
+          rawOffset,
+          depths: m.result!.points.map((p) => p.depth),
+          reason: m.datumReason,
+        };
+      });
     return { code: detail.borehole.code, connected, series, boundaries };
   }
 

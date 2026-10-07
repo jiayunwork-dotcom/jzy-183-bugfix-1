@@ -79,7 +79,12 @@ export interface ComputedResult {
   datumIndex: number;
   ordinalInDatum: number;
   relativeBaseMeasurementId: string | null;
-  datumAnchor: number;
+  /**
+   * 本基准段相对第 0 段的逐深度拼接偏移（mm，与 points 同序）。
+   * connected[i] = relativeDisplacements[i] + datumAnchor[i]。
+   * 第 0 段为全 0；其余段在段内基准处按上一段末测逐深度对齐（见 docs/datum.md）。
+   */
+  datumAnchor: number[];
   relativeDisplacements: number[];
   connectedDisplacements: number[];
   cumulativeRaw: number[];
@@ -101,7 +106,10 @@ export interface EngineBoundary {
   measuredAtMs: number;
   datumIndex: number;
   reason: DatumReason;
-  anchor: number;
+  /** 逐深度拼接偏移（mm）；同时给出按深度对齐前、上一段末测的原始逐深度差异。 */
+  anchor: number[];
+  /** 对齐前新基准复测与上一段末测的逐深度原始差异 C(reset)−C(prev_last)，诊断用。 */
+  rawOffset: number[];
 }
 
 export interface FullComputeOutput {

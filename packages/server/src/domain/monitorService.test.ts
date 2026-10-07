@@ -72,6 +72,10 @@ beforeEach(async () => {
   tick();
   await monitor.addCalibration({ probeCode: 'P1', effectiveAt: '2024-01-01', factor: 1 });
   tick();
+  await monitor.registerProbe({ code: 'P2' });
+  tick();
+  await monitor.addCalibration({ probeCode: 'P2', effectiveAt: '2024-01-01', factor: 1 });
+  tick();
   await monitor.createBorehole(boreholeInput());
   tick();
 });
@@ -89,6 +93,23 @@ async function latestResult(measurementId: string): Promise<ResultJson> {
 async function expectProfile(id: string, expectedMm: number[]) {
   const r = await latestResult(id);
   expect(r.points.map((p) => p.relativeDisplacement)).toEqual(expectedMm.map((v) => expect.closeTo(v, 10)));
+}
+
+async function registerProbe(code: string, factor = 1) {
+  await monitor.registerProbe({ code });
+  tick();
+  await monitor.addCalibration({ probeCode: code, effectiveAt: '2024-01-01', factor });
+  tick();
+}
+
+async function expectConnected(id: string, expectedMm: number[]) {
+  const r = await latestResult(id);
+  expect(r.points.map((p) => p.connectedDisplacement)).toEqual(expectedMm.map((v) => expect.closeTo(v, 10)));
+}
+
+async function expectRates(id: string, expectedMmPerDay: number[]) {
+  const r = await latestResult(id);
+  expect(r.points.map((p) => p.rate)).toEqual(expectedMmPerDay.map((v) => expect.closeTo(v, 10)));
 }
 
 describe('基准与剖面', () => {
@@ -320,27 +341,172 @@ describe('输入拒收', () => {
 });
 
 describe('基准切换拼接', () => {
-  it('换探头新基准：旧段末值按深度差异中位数拼接，剖面图标得出切换位置', async () => {
-    await add(0, ZERO());
-    // 旧段末测：升序段 0.004,0.004,0,0 → 累计 [4,2,0,0]
-    await add(2, readingsFromTilts([0.004, 0.004, 0, 0]));
-    // 换探头当天复测：常数 tilt 0.002/段 → 新基准原始累计 [4,3,2,1]
-    const idReset = await add(
+  it('换探头：常数零漂被逐深度对齐，当天剖面不变、孔底为零、速率为零、不误警', async () => {
+    // 三号孔复现场景：新探头每段带 0.002 常数零漂（累计剖面上呈线性形状）。
+    const id0 = await add(0, ZERO(), { probeCode: 'P1' });
+    // 旧探头末测：升序段 0.004,0.004,0,0 → 原始累计 [4,2,0,0]
+    const id2 = await add(2, readingsFromTilts([0.004, 0.004, 0, 0]), { probeCode: 'P1' });
+    // 第 4 天换新探头复测并标记新基准：0.006,0.006,0.002,0.002 → 原始累计 [8,5,2,1]
+    const id4 = await add(
       4,
-      readingsFromTilts([0.002, 0.002, 0.002, 0.002]),
-      { datumReset: true, datumReason: 'probe_change' },
+      readingsFromTilts([0.006, 0.006, 0.002, 0.002]),
+      { probeCode: 'P2', datumReset: true, datumReason: 'probe_change' },
     );
-    const reset = await latestResult(idReset);
+
+    const reset = await latestResult(id4);
     // 新段内相对剖面处处 0
     expect(reset.points.every((p) => p.relativeDisplacement === 0)).toBe(true);
-    // 与旧段末测逐深度差异 = 新基准原始[4,3,2,1] - 旧[4,2,0,0] = [0,1,2,1]，中位数 = 1
-    reset.points.forEach((p) => expect(p.connectedDisplacement).toBeCloseTo(1, 10));
+    // 连续剖面与旧探头末测逐深度一致；孔底固定点仍为 0
+    await expectConnected(id4, [4, 2, 0, 0]);
+    // 跨基准速率逐点为 0，当天不触发任何预警
+    await expectRates(id4, [0, 0, 0, 0]);
+    expect(reset.level).toBe('none');
+    expect(reset.maxAbsRate).toBeCloseTo(0, 10);
     expect(reset.datumIndex).toBe(1);
+    expect(reset.datumAnchor).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 跨基准速率仍逐点打 crossDatum 标记（提示判读），但等级不受影响
+    expect(reset.points.every((p) => p.crossDatum)).toBe(true);
+    void id0;
+    void id2;
+
+    // 第 6 天：浅两段各再动 1mm（tilt +0.002/段）→ 相对第 4 天 [2,1,0,0]
+    const id6 = await add(
+      6,
+      readingsFromTilts([0.008, 0.008, 0.002, 0.002]),
+      { probeCode: 'P2' },
+    );
+    await expectProfile(id6, [2, 1, 0, 0]);
+    await expectConnected(id6, [6, 3, 0, 0]);
+    await expectRates(id6, [1, 0.5, 0, 0]);
+    const r6 = await latestResult(id6);
+    // 输入走 (0.5±x/2) 读数，1 mm/d 有 ~1e-15 的正浮点残差，严格 > 蓝阈值 → 蓝
+    expect(r6.maxAbsRate).toBeCloseTo(1, 12);
+    expect(r6.level).toBe('blue');
+    expect(r6.points.map((p) => p.level)).toEqual(['blue', 'none', 'none', 'none']);
+    expect(r6.points.every((p) => !p.crossDatum)).toBe(true);
 
     const overlay = await query.profileOverlay('BH-3', 'all', true);
     expect(overlay.boundaries).toHaveLength(1);
-    expect(overlay.boundaries[0]!.measurementId).toBe(idReset);
-    expect(overlay.boundaries[0]!.anchor).toBeCloseTo(1, 10);
-    expect(reset.points.every((p) => p.crossDatum)).toBe(true);
+    const b = overlay.boundaries[0]!;
+    expect(b.measurementId).toBe(id4);
+    // 逐深度拼接向量 = 上一段末测连续剖面
+    expect(b.anchor).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 被吸收的逐深度原始差异 = 新基准原始 [8,5,2,1] − 旧末测 [4,2,0,0]
+    expect(b.rawOffset).toEqual([4, 3, 2, 1].map((v) => expect.closeTo(v, 10)));
+    // 叠图：换探头前后曲线在第 4 天重合，整条序列接得起来
+    const byId = new Map(overlay.series.map((s) => [s.measurementId, s.values]));
+    expect(byId.get(id4)).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(byId.get(id6)).toEqual([6, 3, 0, 0].map((v) => expect.closeTo(v, 10)));
+  });
+
+  it('连续换两次探头：两段零漂都被逐深度吸收，跨段速率始终为零', async () => {
+    await registerProbe('P3');
+    await add(0, ZERO(), { probeCode: 'P1' });
+    await add(2, readingsFromTilts([0.004, 0.004, 0, 0]), { probeCode: 'P1' });
+    await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2', datumReset: true, datumReason: 'probe_change',
+    });
+    // 第 6 天新探头上浅两段各动 1mm
+    await add(6, readingsFromTilts([0.008, 0.008, 0.002, 0.002]), { probeCode: 'P2' });
+    // 第 8 天再换 P3：在第 6 天形状上浅两段各叠 0.001 常数零漂 + 最浅段真实动 2mm（tilt +0.004）
+    await add(8, readingsFromTilts([0.013, 0.009, 0.003, 0.003]), {
+      probeCode: 'P3', datumReset: true, datumReason: 'probe_change',
+    });
+    const id10 = await add(10, readingsFromTilts([0.015, 0.009, 0.003, 0.003]), { probeCode: 'P3' });
+
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    expect(overlay.boundaries).toHaveLength(2);
+    // 第二次切换当天与第 6 天连续剖面一致 [6,3,0,0]
+    const id8 = overlay.boundaries[1]!.measurementId;
+    await expectConnected(id8, [6, 3, 0, 0]);
+    await expectRates(id8, [0, 0, 0, 0]);
+    // 第 10 天：最浅段再动 1mm（2d），速率 0.5，深部位移/速率为 0
+    await expectConnected(id10, [7, 3, 0, 0]);
+    await expectRates(id10, [0.5, 0, 0, 0]);
+  });
+
+  it('新基准段只有一次测量就又换探头，同样逐深度对齐、不误警', async () => {
+    await registerProbe('P3');
+    await add(0, ZERO(), { probeCode: 'P1' });
+    await add(2, readingsFromTilts([0.004, 0, 0, 0]), { probeCode: 'P1' }); // 累计 [2,0,0,0]
+    await add(4, readingsFromTilts([0.006, 0.002, 0.002, 0.002]), {
+      probeCode: 'P2', datumReset: true, datumReason: 'probe_change',
+    });
+    const id6 = await add(6, readingsFromTilts([0.009, 0.005, 0.005, 0.005]), {
+      probeCode: 'P3', datumReset: true, datumReason: 'probe_change',
+    });
+    await expectConnected(id6, [2, 0, 0, 0]);
+    await expectRates(id6, [0, 0, 0, 0]);
+    expect((await latestResult(id6)).level).toBe('none');
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    expect(overlay.boundaries).toHaveLength(2);
+    expect(overlay.boundaries.map((b) => b.anchor)).toEqual([
+      [2, 0, 0, 0].map((v) => expect.closeTo(v, 10)),
+      [2, 0, 0, 0].map((v) => expect.closeTo(v, 10)),
+    ]);
+  });
+
+  it('在旧末测与换探头复测之间补录一次测量：拼接对齐到新补入的一测', async () => {
+    await add(0, ZERO(), { probeCode: 'P1' });
+    await add(2, readingsFromTilts([0.004, 0.004, 0, 0]), { probeCode: 'P1' });
+    const id4 = await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2', datumReset: true, datumReason: 'probe_change',
+    });
+    // 第 3 天补录（不换探头、不打基准）：累计 [2,1,0,0]
+    await monitor.addMeasurement('BH-3', measurement(3, readingsFromTilts([0.002, 0.002, 0, 0]), { probeCode: 'P1' }));
+    tick();
+
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    expect(overlay.boundaries).toHaveLength(1);
+    // 上一段末测变成第 3 天：拼接向量与当天连续剖面随之改为 [2,1,0,0]
+    expect(overlay.boundaries[0]!.anchor).toEqual([2, 1, 0, 0].map((v) => expect.closeTo(v, 10)));
+    await expectConnected(id4, [2, 1, 0, 0]);
+    await expectRates(id4, [0, 0, 0, 0]);
+  });
+
+  it('更正换探头之前的读数：后续各次剖面/速率/等级级联更新，旧判级仍可查', async () => {
+    await add(0, ZERO(), { probeCode: 'P1' });
+    const id2 = await add(2, readingsFromTilts([0.004, 0.004, 0, 0]), { probeCode: 'P1' });
+    const id4 = await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2', datumReset: true, datumReason: 'probe_change',
+    });
+    const id6 = await add(6, readingsFromTilts([0.008, 0.008, 0.002, 0.002]), { probeCode: 'P2' });
+
+    // 更正前：第 2 天孔口 4mm / 2d ≈ 2mm/d（浮点正残差下严格大于黄阈值 2）→ 黄；
+    // 第 4/6 天连续剖面 [4,2,0,0]/[6,3,0,0]
+    expect((await latestResult(id2)).level).toBe('yellow');
+    await expectConnected(id4, [4, 2, 0, 0]);
+    tick(); // 让“更正前”的快照时间严格早于更正时刻
+    const atSwap = clockMs;
+    tick(); // correctMeasurement 内部不再 tick，保证更正快照晚于 atSwap
+
+    // 更正第 2 天为孔口 10mm（升序段 0.016,0.004,0,0 → 累计 [10,2,0,0]）
+    const rev2 = (await query.measurementDetail(id2)).measurement.revision;
+    await monitor.correctMeasurement(
+      id2,
+      rev2,
+      measurement(2, readingsFromTilts([0.016, 0.004, 0, 0]), { probeCode: 'P1' }),
+    );
+    tick();
+
+    // 第 2 天升级为红（5mm/d）；拼接向量级联，第 4/6 天连续剖面整体上移
+    expect((await latestResult(id2)).level).toBe('red');
+    await expectConnected(id4, [10, 2, 0, 0]);
+    await expectConnected(id6, [12, 3, 0, 0]);
+    // 第 4→6 天速率只反映新段内真实增量，不受拼接更正影响
+    await expectRates(id6, [1, 0.5, 0, 0]);
+
+    // “按当时数据”仍能查到换探头当天的旧剖面与旧判级
+    const past = await monitor.historicalGrade(id4, atSwap);
+    expect(past.changed).toBe(true);
+    expect(past.asOf.result.points.map((p) => p.connectedDisplacement)).toEqual(
+      [4, 2, 0, 0].map((v) => expect.closeTo(v, 10)),
+    );
+    expect(past.current.result.points.map((p) => p.connectedDisplacement)).toEqual(
+      [10, 2, 0, 0].map((v) => expect.closeTo(v, 10)),
+    );
+    const past2 = await monitor.historicalGrade(id2, atSwap);
+    expect(past2.asOf.level).toBe('yellow');
+    expect(past2.current.level).toBe('red');
   });
 });

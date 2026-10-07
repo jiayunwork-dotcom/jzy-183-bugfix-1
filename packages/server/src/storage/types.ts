@@ -92,7 +92,7 @@ export interface ResultJson {
   datumIndex: number;
   ordinalInDatum: number;
   relativeBaseMeasurementId: string | null;
-  datumAnchor: number;
+  datumAnchor: number[];
   maxAbsRate: number | null;
   level: string;
   crossDatumRate: boolean;
@@ -104,7 +104,8 @@ export interface DatumBoundaryJson {
   measuredAt: string;
   datumIndex: number;
   reason: DatumReason;
-  anchor: number;
+  anchor: number[];
+  rawOffset: number[];
 }
 
 export interface BoreholeThresholdRow {
