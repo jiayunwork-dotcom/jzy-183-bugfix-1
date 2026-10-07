@@ -21,7 +21,7 @@ function factorAt(probe: EngineProbe | undefined, measuredAtMs: number): number 
  *  - tilt = (forward - reverse) * factor （无量纲，正弦值近似；
  *    正反测互换即变号，方向约定与“正方向朝向”一致）
  *  - segmentDisplacement = tilt * spacing(mm)
- *  - cumulativeRaw：从孔底固定点逐段累加（深度降序累加，见 docs/datum.md）
+ *  - cumulativeRaw：从孔底固定点逐段累加（深度降序累加，见 README“测点与测段”）
  *  - checksum = forward + reverse，并按中位数/MAD 标记可疑点
  *
  * 返回按深度降序（孔口 → 孔底方向索引为 0..n-1，

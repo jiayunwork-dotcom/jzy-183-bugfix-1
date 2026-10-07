@@ -57,7 +57,7 @@ const profileOption = computed<echarts.EChartsOption | null>(() => {
     lineStyle: { width: s.datumReset ? 3 : 1.5 },
     emphasis: { focus: 'series' },
   }));
-  // 基准切换竖线：标注在每条边界测量的连接位移起点（取中位数位置）
+  // 基准切换竖线：标注在边界测量连接剖面的中间深度位置
   const markLines = overlay.value.boundaries.map((b) => {
     const s = overlay.value!.series.find((x) => x.measurementId === b.measurementId);
     const x = s ? s.values[Math.floor(s.values.length / 2)] : 0;

@@ -6,7 +6,7 @@ import type {
   IncrementalResult,
   PreparedMeasurement,
 } from './types.js';
-import { LEVEL_RANK, classifyRate, median, thresholdsAtDepth } from './geometry.js';
+import { LEVEL_RANK, classifyRate, thresholdsAtDepth } from './geometry.js';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -52,7 +52,7 @@ interface BuildContext {
   groups: GroupInfo[];
   groupByIndex: GroupInfo[];
   relatives: RelEntry[]; // per prepared index
-  anchors: number[]; // per group
+  anchors: number[][]; // per group，逐深度拼接锚点
   connected: number[][];
 }
 
@@ -70,30 +70,38 @@ function buildRelatives(ctx: BuildContext): void {
 }
 
 /**
- * 基准拼接（决策，详见 docs/datum.md）：
- * anchor[0] = 0；新段 k 的基准是该段第一次测量（修复/换探头当天复测），
- * 认为它与上一段最后一次测量之间没有真实位移，逐深度差异全部为系统偏移，
- * 取所有深度差异的中位数（L1 最优的标量偏移）作为拼接量：
- *   anchor[k] = anchor[k-1] + median_d(relative(prev_last, d))
- * connected(m, d) = anchor[group(m)] + relative(m, d)
+ * 基准拼接（决策，详见 README“基准（datum）”一节）：
+ * anchor[0] 处处为 0；新段 k 的基准是该段第一次测量（修复/换探头当天复测，
+ * 其段内相对剖面 reset_k 处处为 0）。复测与旧段最后一次测量紧邻，无法区分
+ * 这段间隔里的逐深度差异是系统零漂还是真实位移，本系统按“零漂移处理”拍板：
+ * 复测当天的连接剖面逐深度强制等于旧段末测的连接剖面，即每个深度各有自己的
+ * 标量拼接量：
+ *   anchor[k][d] = connected(last_{k−1}, d)
+ *                = anchor[k−1][d] + relative(last_{k−1}, d)
+ *   connected(m, d) = anchor[group(m)][d] + relative(m, d)
+ * 因此跨基准的第一条速率逐深度严格为 0，不参与预警；该速率仍打 crossDatum
+ * 标记，提示它是“按零漂移假设对齐”得到的，而非实测变化。
  */
-function buildAnchors(ctx: BuildContext): void {
-  const { groups, relatives } = ctx;
-  ctx.anchors[0] = 0;
-  for (let k = 1; k < groups.length; k++) {
-    const prevLast = groups[k]!.start - 1;
-    const prevRel = relatives[prevLast]!.rel;
-    const offset = median([...prevRel].sort((a, b) => a - b));
-    ctx.anchors[k] = ctx.anchors[k - 1]! + offset;
+function buildAnchorsAndConnected(ctx: BuildContext): void {
+  const { prepared, groups, relatives, connected } = ctx;
+  const pointCount = prepared[0]!.points.length;
+  ctx.anchors[0] = new Array(pointCount).fill(0);
+  for (let k = 0; k < groups.length; k++) {
+    if (k === 0) {
+      // 第 0 段起点即孔的第一次测量，连接剖面 = 段内相对剖面（基准处处为 0）。
+      connected[groups[0]!.start] = [...relatives[groups[0]!.start]!.rel];
+    } else {
+      const prevLast = groups[k]!.start - 1;
+      // 逐深度冻结：新段起点连接剖面 = 旧段末测连接剖面。
+      // 直接复用旧末测的连接数组（拷贝），保证跨段首条速率严格为 0（连浮点差都没有）。
+      ctx.anchors[k] = [...connected[prevLast]!];
+      connected[groups[k]!.start] = [...connected[prevLast]!];
+    }
+    const end = groups[k + 1]?.start ?? prepared.length;
+    for (let i = groups[k]!.start + 1; i < end; i++) {
+      connected[i] = relatives[i]!.rel.map((v, d) => v + ctx.anchors[k]![d]!);
+    }
   }
-}
-
-function buildConnected(ctx: BuildContext): void {
-  const { groupByIndex, anchors, relatives, connected } = ctx;
-  relatives.forEach((entry, i) => {
-    const anchor = anchors[groupByIndex[i]!.datumIndex]!;
-    connected[i] = entry.rel.map((v) => v + anchor);
-  });
 }
 
 function rateBetween(cur: number[], prev: number[], curMs: number, prevMs: number): number[] {
@@ -118,8 +126,7 @@ export function computeBoreholeFull(
     connected: [],
   };
   buildRelatives(ctx);
-  buildAnchors(ctx);
-  buildConnected(ctx);
+  buildAnchorsAndConnected(ctx);
   const results = finalizeWithThresholds(ctx, revisionFor, borehole.thresholds);
   const boundaries: EngineBoundary[] = groups
     .filter((g) => g.datumIndex > 0)
@@ -130,7 +137,7 @@ export function computeBoreholeFull(
         measuredAtMs: pm.measurement.measuredAtMs,
         datumIndex: g.datumIndex,
         reason: pm.measurement.datumReason,
-        anchor: ctx.anchors[g.datumIndex]!,
+        anchors: ctx.anchors[g.datumIndex]!,
       };
     });
   return { results, boundaries };
@@ -158,8 +165,14 @@ function finalizeWithThresholds(
       rates = pm.points.map(() => null);
     } else {
       const cross = groupByIndex[i - 1]!.datumIndex !== g.datumIndex;
-      rates = rateBetween(connected[i]!, connected[i - 1]!, m.measuredAtMs, prepared[i - 1]!.measurement.measuredAtMs);
-      if (cross) crossFlags.fill(true);
+      if (cross) {
+        // 基准段起点（修复/换探头当天复测）：连接剖面已与旧段末测逐深度对齐，
+        // 跨段首条速率按约定严格为 0；逐点打 crossDatum 标记提示判读谨慎。
+        rates = pm.points.map(() => 0);
+        crossFlags.fill(true);
+      } else {
+        rates = rateBetween(connected[i]!, connected[i - 1]!, m.measuredAtMs, prepared[i - 1]!.measurement.measuredAtMs);
+      }
     }
 
     let maxAbsRate: number | null = null;
@@ -181,7 +194,7 @@ function finalizeWithThresholds(
       datumIndex: g.datumIndex,
       ordinalInDatum: i - g.start,
       relativeBaseMeasurementId: relatives[i]!.baseId,
-      datumAnchor: anchors[g.datumIndex]!,
+      datumAnchors: anchors[g.datumIndex]!,
       relativeDisplacements: relatives[i]!.rel,
       connectedDisplacements: connected[i]!,
       cumulativeRaw: pm.points.map((p) => p.cumulativeRaw),
@@ -242,9 +255,9 @@ function sameResult(a: ComputedResult, b: ComputedResult): boolean {
     a.datumIndex === b.datumIndex &&
     a.ordinalInDatum === b.ordinalInDatum &&
     a.relativeBaseMeasurementId === b.relativeBaseMeasurementId &&
-    a.datumAnchor === b.datumAnchor &&
     a.maxAbsRate === b.maxAbsRate &&
     a.level === b.level &&
+    arraysEqual(a.datumAnchors, b.datumAnchors) &&
     arraysEqual(a.relativeDisplacements, b.relativeDisplacements) &&
     arraysEqual(a.connectedDisplacements, b.connectedDisplacements) &&
     arraysEqual(a.cumulativeRaw, b.cumulativeRaw) &&

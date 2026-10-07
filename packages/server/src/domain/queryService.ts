@@ -97,7 +97,7 @@ export class QueryService {
         measurementId: m.id,
         measuredAt: m.measuredAt,
         datumIndex: m.result!.datumIndex,
-        anchor: m.result!.datumAnchor,
+        anchors: m.result!.datumAnchors,
         reason: m.datumReason,
       }));
     return { code: detail.borehole.code, connected, series, boundaries };

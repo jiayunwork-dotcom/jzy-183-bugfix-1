@@ -319,28 +319,202 @@ describe('输入拒收', () => {
   });
 });
 
-describe('基准切换拼接', () => {
-  it('换探头新基准：旧段末值按深度差异中位数拼接，剖面图标得出切换位置', async () => {
+describe('基准切换拼接（换探头）', () => {
+  async function registerProbe2(code: string) {
+    await monitor.registerProbe({ code });
+    tick();
+    await monitor.addCalibration({ probeCode: code, effectiveAt: '2024-01-01', factor: 1 });
+    tick();
+  }
+
+  /** 用户复现场景：孔深 2m / 间距 0.5m，阈值蓝1黄2红4。 */
+  async function setupRepro() {
+    await registerProbe2('P2');
     await add(0, ZERO());
-    // 旧段末测：升序段 0.004,0.004,0,0 → 累计 [4,2,0,0]
+    // 第 2 天（旧探头）：升序段 0.004,0.004,0,0 → 累计 [4,2,0,0]
     await add(2, readingsFromTilts([0.004, 0.004, 0, 0]));
-    // 换探头当天复测：常数 tilt 0.002/段 → 新基准原始累计 [4,3,2,1]
-    const idReset = await add(
-      4,
-      readingsFromTilts([0.002, 0.002, 0.002, 0.002]),
-      { datumReset: true, datumReason: 'probe_change' },
-    );
+    // 第 4 天换新探头复测并标为换探头新基准；新探头每段带 0.002 常数零漂
+    const idReset = await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2',
+      datumReset: true,
+      datumReason: 'probe_change',
+    });
+    // 第 6 天：浅部继续变形（新探头读数，零漂仍在）
+    const idLast = await add(6, readingsFromTilts([0.008, 0.008, 0.002, 0.002]), { probeCode: 'P2' });
+    return { idReset, idLast };
+  }
+
+  it('换探头当天：剖面与旧段末测逐深度一致 [4,2,0,0]，孔底为零，速率全零，不预警', async () => {
+    const { idReset } = await setupRepro();
     const reset = await latestResult(idReset);
     // 新段内相对剖面处处 0
     expect(reset.points.every((p) => p.relativeDisplacement === 0)).toBe(true);
-    // 与旧段末测逐深度差异 = 新基准原始[4,3,2,1] - 旧[4,2,0,0] = [0,1,2,1]，中位数 = 1
-    reset.points.forEach((p) => expect(p.connectedDisplacement).toBeCloseTo(1, 10));
+    // 逐深度冻结拼接：不再是清一色 1mm，孔底固定点保持 0
+    expect(reset.points.map((p) => p.connectedDisplacement)).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 跨基准首条速率严格为 0（连浮点残差都没有），不触发任何预警
+    expect(reset.points.every((p) => p.rate === 0)).toBe(true);
+    expect(reset.maxAbsRate).toBe(0);
+    expect(reset.level).toBe('none');
     expect(reset.datumIndex).toBe(1);
+    // 逐点仍打跨基准标记，提醒这是按“零漂移”假设对齐出来的速率
+    expect(reset.points.every((p) => p.crossDatum)).toBe(true);
 
     const overlay = await query.profileOverlay('BH-3', 'all', true);
     expect(overlay.boundaries).toHaveLength(1);
     expect(overlay.boundaries[0]!.measurementId).toBe(idReset);
-    expect(overlay.boundaries[0]!.anchor).toBeCloseTo(1, 10);
-    expect(reset.points.every((p) => p.crossDatum)).toBe(true);
+    expect(overlay.boundaries[0]!.anchors).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+  });
+
+  it('换探头之后：第 6 天剖面为 [6,3,0,0]，与换探头前的曲线接得上，速率 [1,0.5,0,0]', async () => {
+    const { idReset, idLast } = await setupRepro();
+    const last = await latestResult(idLast);
+    expect(last.points.map((p) => p.connectedDisplacement)).toEqual([6, 3, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 孔底固定点仍为 0
+    expect(last.points[3]!.connectedDisplacement).toBe(0);
+    expect(last.points.map((p) => p.rate)).toEqual([1, 0.5, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 孔口速率恰为蓝阈值 1（浮点噪声由定级容差吸收，等于阈值不预警）
+    expect(last.level).toBe('none');
+    expect(last.points.some((p) => p.crossDatum)).toBe(false);
+
+    // 叠加图：第 2 天末测与第 4 天复测完全重合，整条新段曲线与旧段接得上
+    const all = (await query.borehole('BH-3')).measurements;
+    const id2 = all[1]!.id;
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    const byId = new Map(overlay.series.map((s) => [s.measurementId, s.values]));
+    expect(byId.get(id2)).toEqual(byId.get(idReset));
+    expect(byId.get(idLast)).toEqual([6, 3, 0, 0].map((v) => expect.closeTo(v, 10)));
+  });
+
+  it('更正换探头之前的测量：后面各次剖面/速率/等级跟着更新；“按当时数据”的判级仍可查', async () => {
+    const { idReset, idLast } = await setupRepro();
+    // 第 2 天原始 [4,2,0,0]，孔口速率 2 mm/d（严格大于蓝1、不大于黄2）→ 蓝
+    const id2 = (await query.borehole('BH-3')).measurements[1]!.id;
+    expect((await latestResult(id2)).points[0]!.rate).toBeCloseTo(2, 10);
+    expect((await latestResult(id2)).level).toBe('blue');
+    const blueView = await monitor.historicalGrade(id2, clockMs);
+    expect(blueView.current.level).toBe('blue');
+    const atBlue = Date.parse(blueView.current.computedAt);
+
+    const counts = async () => {
+      const ids = [(await query.borehole('BH-3')).measurements[0]!.id, id2, idReset, idLast];
+      return Object.fromEntries(
+        await Promise.all(ids.map(async (id) => [id, (await query.measurementDetail(id)).snapshotHistory.length] as const)),
+      );
+    };
+    expect(Object.values(await counts()).every((n) => n === 1)).toBe(true);
+
+    // 把第 2 天更正为 [1,0,0,0]（升序段 0.002,0,0,0）：第 2 天速率 0.5 → 无预警
+    const detail = (await query.measurementDetail(id2)).measurement;
+    await monitor.correctMeasurement(id2, detail.revision, measurement(2, readingsFromTilts([0.002, 0, 0, 0])));
+    tick();
+
+    // 第 2 天自身变为 [1,0,0,0]、速率 0.5 → 无预警
+    const r2 = await latestResult(id2);
+    expect(r2.points.map((p) => p.connectedDisplacement)).toEqual([1, 0, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(r2.level).toBe('none');
+    // 复测当天锚点跟着挪到 [1,0,0,0]，速率仍全零、不预警
+    const rReset = await latestResult(idReset);
+    expect(rReset.points.map((p) => p.connectedDisplacement)).toEqual([1, 0, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(rReset.points.every((p) => p.rate === 0)).toBe(true);
+    expect(rReset.level).toBe('none');
+    // 第 6 天整体跟随为 [3,1,0,0]；段内速率 [1,0.5,0,0] 不受更正影响
+    const rLast = await latestResult(idLast);
+    expect(rLast.points.map((p) => p.connectedDisplacement)).toEqual([3, 1, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(rLast.points.map((p) => p.rate)).toEqual([1, 0.5, 0, 0].map((v) => expect.closeTo(v, 10)));
+
+    // 受影响的三次都写了新快照，首测未变；强制全量重算不再新增
+    const after = await counts();
+    expect(after[(await query.borehole('BH-3')).measurements[0]!.id]).toBe(1);
+    expect(after[id2]).toBe(2);
+    expect(after[idReset]).toBe(2);
+    expect(after[idLast]).toBe(2);
+    const agg = await monitor.getBoreholeByCode('BH-3');
+    await monitor.forceFullRecompute(agg.borehole.id);
+    tick();
+    expect(await counts()).toEqual(after);
+
+    // “按当时数据”：蓝；“按现在数据”：无预警，两者都能查到
+    const diff = await monitor.historicalGrade(id2, atBlue);
+    expect(diff.changed).toBe(true);
+    expect(diff.asOf.level).toBe('blue');
+    expect(diff.current.level).toBe('none');
+  });
+
+  it('在旧探头末测与换探头复测之间补录：锚点改用补录末测，复测速率仍为零，后续曲线跟随', async () => {
+    await registerProbe2('P2');
+    await add(0, ZERO());
+    // 先只有 第4天换探头复测、第6天跟进：此时锚点冻结在第 0 天 [0,0,0,0]
+    await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2',
+      datumReset: true,
+      datumReason: 'probe_change',
+    });
+    const id6 = await add(6, readingsFromTilts([0.008, 0.008, 0.002, 0.002]), { probeCode: 'P2' });
+    expect((await latestResult((await query.borehole('BH-3')).measurements[1]!.id)).points.map((p) => p.connectedDisplacement))
+      .toEqual([0, 0, 0, 0].map((v) => expect.closeTo(v, 10)));
+
+    // 补录第 2 天旧探头测量 [4,2,0,0]
+    await monitor.addMeasurement('BH-3', measurement(2, readingsFromTilts([0.004, 0.004, 0, 0])));
+    tick();
+    // 时间顺序变为 第0天, 第2天, 第4天复测, 第6天
+    const inOrder = (await query.borehole('BH-3')).measurements;
+    const resetId = inOrder[2]!.id;
+    const reset = await latestResult(resetId);
+    expect(reset.points.map((p) => p.connectedDisplacement)).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(reset.points.every((p) => p.rate === 0)).toBe(true);
+    const last = await latestResult(id6);
+    expect(last.points.map((p) => p.connectedDisplacement)).toEqual([6, 3, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(last.points.map((p) => p.rate)).toEqual([1, 0.5, 0, 0].map((v) => expect.closeTo(v, 10)));
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    expect(overlay.boundaries[0]!.anchors).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+  });
+
+  it('连换两次探头（中间段只有一次测量）：两次复测都冻结在同一剖面，之后的变形照常累计', async () => {
+    await registerProbe2('P2');
+    await registerProbe2('P3');
+    await add(0, ZERO());
+    await add(2, readingsFromTilts([0.004, 0.004, 0, 0])); // [4,2,0,0]
+    // P2 常数零漂 0.002/段
+    const idR1 = await add(4, readingsFromTilts([0.006, 0.006, 0.002, 0.002]), {
+      probeCode: 'P2',
+      datumReset: true,
+      datumReason: 'probe_change',
+    });
+    // 紧接着又换 P3（P3 常数零漂 0.003/段，漂移形状不同），中间段只有第 4 天一次测量
+    const idR2 = await add(6, readingsFromTilts([0.007, 0.007, 0.003, 0.003]), {
+      probeCode: 'P3',
+      datumReset: true,
+      datumReason: 'probe_change',
+    });
+    // 第 8 天：浅部两段各再增 0.004/0.004 物理倾斜（P3 读数）
+    const id8 = await add(8, readingsFromTilts([0.011, 0.011, 0.003, 0.003]), { probeCode: 'P3' });
+
+    for (const id of [idR1, idR2]) {
+      const r = await latestResult(id);
+      expect(r.points.every((p) => p.relativeDisplacement === 0)).toBe(true);
+      expect(r.points.map((p) => p.connectedDisplacement)).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+      expect(r.points.every((p) => p.rate === 0)).toBe(true);
+      expect(r.level).toBe('none');
+    }
+    expect((await latestResult(idR2)).datumIndex).toBe(2);
+    // 第 8 天：冻结的 [4,2] + 段内相对 [4,2] = [8,4]，孔底始终 0；速率 [2,1,0,0]
+    const r8 = await latestResult(id8);
+    expect(r8.points.map((p) => p.connectedDisplacement)).toEqual([8, 4, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(r8.points.map((p) => p.rate)).toEqual([2, 1, 0, 0].map((v) => expect.closeTo(v, 10)));
+
+    const overlay = await query.profileOverlay('BH-3', 'all', true);
+    expect(overlay.boundaries).toHaveLength(2);
+    for (const b of overlay.boundaries) expect(b.anchors).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+
+    // 增量 ≡ 全量：强制全量重算不产生任何新快照（服务内还有逐数值断言）
+    const agg = await monitor.getBoreholeByCode('BH-3');
+    const snapshotCounts = async () => {
+      const ms = (await query.borehole('BH-3')).measurements;
+      return Promise.all(ms.map(async (m) => (await query.measurementDetail(m.id)).snapshotHistory.length));
+    };
+    const countsBefore = await snapshotCounts();
+    await monitor.forceFullRecompute(agg.borehole.id);
+    tick();
+    expect(await snapshotCounts()).toEqual(countsBefore);
   });
 });

@@ -54,11 +54,17 @@ export function thresholdsAtDepth(thresholds: ThresholdEntry[], depth: number): 
   return { ...t[t.length - 1]!, depth };
 }
 
-/** 速率（绝对值）对照蓝/黄/红阈值定级。 */
+/**
+ * 速率（绝对值）对照蓝/黄/红阈值定级。严格按“超过阈值”判定（等于阈值不预警）。
+ * 1e-9 mm/d 的容差用于吸收读数 → 倾斜 → 段偏移 → 累计 → 速率链路上的浮点噪声：
+ * 例如读数按 0.5 ± tilt/2 给出时，名义上恰好等于阈值的速率会算成
+ * 1.0000000000000009，不应因此误报。
+ */
 export function classifyRate(absRate: number, th: ThresholdEntry): AlarmLevel {
-  if (Number.isFinite(th.red) && absRate > th.red) return 'red';
-  if (Number.isFinite(th.yellow) && absRate > th.yellow) return 'yellow';
-  if (Number.isFinite(th.blue) && absRate > th.blue) return 'blue';
+  const exceeds = (limit: number) => absRate > limit + 1e-9;
+  if (Number.isFinite(th.red) && exceeds(th.red)) return 'red';
+  if (Number.isFinite(th.yellow) && exceeds(th.yellow)) return 'yellow';
+  if (Number.isFinite(th.blue) && exceeds(th.blue)) return 'blue';
   return 'none';
 }
 

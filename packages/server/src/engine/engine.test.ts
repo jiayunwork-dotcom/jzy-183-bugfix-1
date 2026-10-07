@@ -117,3 +117,91 @@ describe('物理对称性', () => {
     expect(preparedDirty[0]!.points).toHaveLength(3);
   });
 });
+
+describe('换探头基准：逐深度冻结拼接', () => {
+  const bh2: EngineBorehole = {
+    id: 'bh2',
+    code: 'BH-X2',
+    depth: 2.0,
+    spacing: 0.5,
+    checksumTolerance: 0.01,
+    thresholds: [
+      { depth: 0.5, blue: 1, yellow: 2, red: 4 },
+      { depth: 2.0, blue: 1, yellow: 2, red: 4 },
+    ],
+  };
+  const depths2 = [0.5, 1.0, 1.5, 2.0];
+
+  function twoProbes(): Map<string, EngineProbe> {
+    return new Map(['P1', 'P2'].map((code, i) => [
+      code,
+      {
+        id: `p${i + 1}`,
+        code,
+        calibrations: [{ id: `c${i + 1}`, probeId: `p${i + 1}`, effectiveAtMs: 0, factor: 1 }],
+      },
+    ]));
+  }
+
+  /** @param tiltsAsc 浅→深四段 tilt；读数正=0.5+tilt/2，反=0.5−tilt/2。 */
+  function m2(id: string, t: number, tiltsAsc: number[], probe = 'P1', reset = false): EngineMeasurement {
+    return {
+      id,
+      measuredAtMs: t * 86_400_000,
+      probeCode: probe,
+      datumReset: reset,
+      datumReason: reset ? (t === 0 ? 'initial' : 'probe_change') : 'initial',
+      inputToken: id,
+      rows: depths2.map((depth, i) => {
+        const diff = tiltsAsc[i]!;
+        return { depth, forward: 0.5 + diff / 2, reverse: 0.5 - diff / 2, probeCodeForward: probe, probeCodeReverse: probe };
+      }),
+    };
+  }
+
+  it('换探头复测当天逐深度对齐旧段末测 [4,2,0,0]：孔底为零、速率严格为零、不预警；次日 [6,3,0,0]', () => {
+    const ms = [
+      m2('d0', 0, [0, 0, 0, 0], 'P1', true),
+      m2('d2', 2, [0.004, 0.004, 0, 0]),
+      // 新探头每段 0.002 常数零漂：原始累计 [8,5,2,1]
+      m2('d4', 4, [0.006, 0.006, 0.002, 0.002], 'P2', true),
+      m2('d6', 6, [0.008, 0.008, 0.002, 0.002], 'P2'),
+    ];
+    const { results, boundaries } = computeBoreholeFull(bh2, prepareMeasurements(bh2, twoProbes(), ms), () => 1);
+
+    const reset = results[2]!;
+    expect(reset.relativeDisplacements.every((v) => v === 0)).toBe(true);
+    expect(reset.connectedDisplacements).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(reset.datumAnchors).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    // 跨基准首条速率严格为 0（直接对齐，连浮点差都没有），不预警
+    expect(reset.rates).toEqual([0, 0, 0, 0]);
+    expect(reset.maxAbsRate).toBe(0);
+    expect(reset.level).toBe('none');
+    expect(reset.crossDatum.every(Boolean)).toBe(true);
+
+    const next = results[3]!;
+    expect(next.connectedDisplacements).toEqual([6, 3, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(next.rates).toEqual([1, 0.5, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(next.level).toBe('none'); // 孔口恰为蓝阈值 1，等于阈值不预警
+    expect(next.crossDatum.every((f) => !f)).toBe(true);
+
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0]!.anchors).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(boundaries[0]!.reason).toBe('probe_change');
+  });
+
+  it('零漂呈深度形状（非线性）时逐深度对齐仍成立：标量中位数会残差，逐深度锚点整体吸收', () => {
+    // 旧段末测 [4,2,0,0]；新探头复测差异呈线性形状，原始累计 [8,4.5,2,0.5]
+    const ms = [
+      m2('d0', 0, [0, 0, 0, 0], 'P1', true),
+      m2('d2', 2, [0.004, 0.004, 0, 0]),
+      m2('d4', 4, [0.007, 0.005, 0.003, 0.001], 'P2', true),
+    ];
+    const { results } = computeBoreholeFull(bh2, prepareMeasurements(bh2, twoProbes(), ms), () => 1);
+    const reset = results[2]!;
+    expect(reset.cumulativeRaw).toEqual([8, 4.5, 2, 0.5].map((v) => expect.closeTo(v, 10)));
+    expect(reset.connectedDisplacements).toEqual([4, 2, 0, 0].map((v) => expect.closeTo(v, 10)));
+    expect(reset.rates).toEqual([0, 0, 0, 0]);
+    expect(reset.level).toBe('none');
+  });
+});

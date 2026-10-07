@@ -81,7 +81,7 @@ export interface ResultJson {
   datumIndex: number;
   ordinalInDatum: number;
   relativeBaseMeasurementId: string | null;
-  datumAnchor: number;
+  datumAnchors: number[];
   maxAbsRate: number | null;
   level: string;
   crossDatumRate: boolean;
@@ -106,7 +106,7 @@ export interface OverlayResp {
     measurementId: string;
     measuredAt: string;
     datumIndex: number;
-    anchor: number;
+    anchors: number[];
     reason: string;
   }[];
 }

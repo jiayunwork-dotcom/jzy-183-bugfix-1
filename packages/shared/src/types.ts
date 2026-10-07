@@ -110,8 +110,11 @@ export interface MeasurementResult {
   maxAbsRate: number | null;
   level: AlarmLevel;
   relativeBaseMeasurementId: string | null;
-  /** 与上一段拼接使用的标量偏移（mm），段内基准以外为 0。 */
-  datumAnchor: number;
+  /**
+   * 本基准段起点逐深度的拼接锚点（mm）= 段内第一次测量在连接坐标系下的剖面。
+   * 段内连接位移 = datumAnchors[d] + 相对剖面[d]；第 0 段处处为 0。
+   */
+  datumAnchors: number[];
   crossDatumRate: boolean;
   points: ProfilePoint[];
 }
@@ -121,7 +124,8 @@ export interface DatumBoundary {
   measuredAt: string;
   datumIndex: number;
   reason: DatumReason;
-  anchor: number;
+  /** 逐深度拼接锚点（mm）：复测当天连接剖面冻结为旧段末测剖面。 */
+  anchors: number[];
 }
 
 export interface ComputeBoreholeResult {

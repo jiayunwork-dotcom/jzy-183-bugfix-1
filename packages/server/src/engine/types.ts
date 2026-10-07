@@ -79,7 +79,12 @@ export interface ComputedResult {
   datumIndex: number;
   ordinalInDatum: number;
   relativeBaseMeasurementId: string | null;
-  datumAnchor: number;
+  /**
+   * 本基准段起点逐深度的拼接锚点（mm）= 该段第一次测量在连接坐标系下的剖面。
+   * 段内连接位移 = datumAnchors[d] + relativeDisplacements[d]。
+   * 第 0 段处处为 0（孔底固定点亦为 0）。
+   */
+  datumAnchors: number[];
   relativeDisplacements: number[];
   connectedDisplacements: number[];
   cumulativeRaw: number[];
@@ -101,7 +106,8 @@ export interface EngineBoundary {
   measuredAtMs: number;
   datumIndex: number;
   reason: DatumReason;
-  anchor: number;
+  /** 逐深度拼接锚点（mm）：复测当天连接剖面 = 旧段末测连接剖面。 */
+  anchors: number[];
 }
 
 export interface FullComputeOutput {
